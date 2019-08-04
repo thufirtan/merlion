@@ -25,10 +25,6 @@ def generate_train_test(original_df, target_col, test_size=0.2):
     return train_test_split(X, y, test_size=test_size)
 
 DEFAULT_PARAMS = {'learning_rate': 0.15, 'metric': 'rmse', 'verbose':-1}
-N_FOLDS = 5
-RANDOM_SEED = 0
-EARLY_STOPPING_ROUNDS = 100
-NUM_BOOST_ROUND = 100000
 
 FEATURE_SPACE = {
     'num_leaves': (10, 2000),
@@ -44,8 +40,8 @@ NO_PICKLE_ITEMS = ['lgb_eval', 'best_params', 'maximize', 'lgbBO', 'lgb_train']
 
 class Merlion:
     '''Base Class for Machine Learning using LightGBM and Bayes Optimization'''
-    def __init__(self, default_params=DEFAULT_PARAMS, feature_space=FEATURE_SPACE, early_stopping_rounds=EARLY_STOPPING_ROUNDS, 
-        num_boost_round=NUM_BOOST_ROUND, n_folds=N_FOLDS, random_seed=RANDOM_SEED, metric='rmse'):
+    def __init__(self, default_params=DEFAULT_PARAMS, feature_space=FEATURE_SPACE, early_stopping_rounds=100, 
+        num_boost_round=100000, n_folds=5, random_seed=0, metric='rmse'):
         default_params['metric'] = metric
         self.default_params = default_params
         self.feature_space = feature_space
@@ -59,14 +55,17 @@ class Merlion:
         '''Excluding items which cannot be pickled'''
         return dict((k, v) for (k, v) in self.__dict__.items() if k not in NO_PICKLE_ITEMS)
 
-    def fit_transform(self, X, nan_value_fill=''):
+    def fit_transform(self, X, threshold=100, nan_value_fill=''):
         '''Fit and transform training dataframe using ordinal encoder for category features'''
         categorical_features = X.select_dtypes(include='object').columns.tolist()
-        num_rows = X.shape[0]
-        categorical_features = [col for col in categorical_features if X[col].nunique() < num_rows]
+        categorical_features_nuniques = X[categorical_features].nunique()
+        categorical_features = categorical_features_nuniques[lambda x: x <= threshold].index.tolist()
+        high_cardinality_features = categorical_features_nuniques[lambda x: x > threshold].index.tolist()
         numerical_features = X.select_dtypes(exclude='object').columns.tolist()
         logger.info(f'Categorical Features {categorical_features}')
         logger.info(f'Numerical Features {numerical_features}')
+        logger.warn(f'High Cardinality Features Ignored {high_cardinality_features}')
+
         self.preprocess = make_column_transformer(
             (make_pipeline(SimpleImputer(strategy='constant', fill_value=nan_value_fill), OrdinalEncoder()), categorical_features),
             (StandardScaler(), numerical_features))
@@ -131,7 +130,7 @@ class Merlion:
 
     def validate_single_model(self, X_test, y_test, metric):
         '''Validate performance of single model'''
-        preds = self.single_model.predict(X_test)
+        preds = self.generate_single_model_predictions(X_test)
         if metric == 'rmse':
             result = np.sqrt(mean_squared_error(y_test, preds))
         elif metric == 'auc':
@@ -203,11 +202,11 @@ class Merlion:
 
     def generate_single_model_predictions(self, X):
         '''Generate predictions for single model'''
-        return self.single_model.predict(X)
+        return self.single_model.predict(X, num_iteration=self.single_model.best_iteration)
 
     def generate_ensemble_models_predictions(self, X):
         '''Generate predictions for ensemble models'''
-        preds = [[x.predict(X) for x in y] for y in self.ensemble_models]
+        preds = [[x.predict(X, num_iteration=x.best_iteration) for x in y] for y in self.ensemble_models]
         average_preds = np.mean(np.mean(preds, axis=0), axis=0)
         return average_preds
 
