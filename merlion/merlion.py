@@ -58,9 +58,11 @@ class Merlion:
     def fit_transform(self, X, threshold=100, nan_value_fill=''):
         '''Fit and transform training dataframe using ordinal encoder for category features'''
         categorical_features = X.select_dtypes(include='object').columns.tolist()
-        categorical_features_nuniques = X[categorical_features].nunique()
-        categorical_features = categorical_features_nuniques[lambda x: x <= threshold].index.tolist()
-        high_cardinality_features = categorical_features_nuniques[lambda x: x > threshold].index.tolist()
+        high_cardinality_features = []
+        if categorical_features:
+            categorical_features_nuniques = X[categorical_features].nunique()
+            categorical_features = categorical_features_nuniques[lambda x: x <= threshold].index.tolist()
+            high_cardinality_features = categorical_features_nuniques[lambda x: x > threshold].index.tolist()
         numerical_features = X.select_dtypes(exclude='object').columns.tolist()
         logger.info(f'Categorical Features {categorical_features}')
         logger.info(f'Numerical Features {numerical_features}')
