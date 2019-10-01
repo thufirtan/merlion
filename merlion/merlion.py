@@ -5,7 +5,8 @@ import lightgbm as lgb
 from bayes_opt import BayesianOptimization
 from sklearn.model_selection import StratifiedKFold, train_test_split, KFold
 from sklearn.metrics import mean_squared_error, roc_auc_score
-from sklearn.preprocessing import LabelEncoder, StandardScaler, OneHotEncoder, OrdinalEncoder
+from sklearn.preprocessing import StandardScaler
+from category_encoders.ordinal import OrdinalEncoder
 from sklearn.compose import ColumnTransformer, make_column_transformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import make_pipeline
@@ -17,6 +18,7 @@ formatter = logging.Formatter('%(asctime)s %(name)-12s %(levelname)-8s %(message
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.DEBUG)
+logger.propagate = False
 
 def generate_train_test(original_df, target_col, test_size=0.2):
     df = original_df.copy()
@@ -24,7 +26,7 @@ def generate_train_test(original_df, target_col, test_size=0.2):
     y = df[target_col]
     return train_test_split(X, y, test_size=test_size)
 
-DEFAULT_PARAMS = {'learning_rate': 0.15, 'metric': 'rmse', 'verbose':-1}
+DEFAULT_PARAMS = {'learning_rate': 0.15, 'metric': 'rmse', 'verbose':-1, 'first_metric_only':True}
 
 FEATURE_SPACE = {
     'num_leaves': (10, 2000),
@@ -64,12 +66,12 @@ class Merlion:
             categorical_features = categorical_features_nuniques[lambda x: x <= threshold].index.tolist()
             high_cardinality_features = categorical_features_nuniques[lambda x: x > threshold].index.tolist()
         numerical_features = X.select_dtypes(exclude='object').columns.tolist()
-        logger.info(f'Categorical Features {categorical_features}')
-        logger.info(f'Numerical Features {numerical_features}')
-        logger.warn(f'High Cardinality Features Ignored {high_cardinality_features}')
+        logger.info('Categorical Features {}'.format(categorical_features))
+        logger.info('Numerical Features {}'.format(numerical_features))
+        logger.warn('High Cardinality Features Ignored {}'.format(high_cardinality_features))
 
         self.preprocess = make_column_transformer(
-            (make_pipeline(SimpleImputer(strategy='constant', fill_value=nan_value_fill), OrdinalEncoder()), categorical_features),
+            (make_pipeline(OrdinalEncoder()), categorical_features),
             (StandardScaler(), numerical_features))
         X_enriched = self.preprocess.fit_transform(X)
         self.feature_names = categorical_features + numerical_features
@@ -85,7 +87,7 @@ class Merlion:
         self.lgb_train = lgb.Dataset(X_train, y_train, feature_name=self.feature_names, categorical_feature=self.categorical_features, free_raw_data=False)
         self.lgbBO = BayesianOptimization(f=self.lgb_eval, pbounds=self.feature_space)
         self.lgbBO.maximize(init_points=init_points, n_iter=n_iter, acq=acq, xi=xi)
-        logger.info(f"Final result: {self.lgbBO.max}")
+        logger.info('Final result: {}'.format(self.lgbBO.max))
         return
 
     def validate_params(self, num_leaves, min_data_in_leaf, colsample_bytree, reg_lambda, max_depth, subsample, feature_fraction):
@@ -109,20 +111,20 @@ class Merlion:
                         num_boost_round=self.num_boost_round, 
                         nfold=self.n_folds, 
                         seed=self.random_seed,
-                        stratified=False, 
-                        metrics=[self.metric], 
+                        stratified=True, 
+                        metrics=self.metric, 
                         early_stopping_rounds=self.early_stopping_rounds,
                         verbose_eval=100)
 
-        metric_value = cv_result[f'{self.metric}-mean'][-1]
-        if self.metric == 'rmse':
+        metric_value = cv_result['{}-mean'.format(self.metric[0])][-1]
+        if self.metric[0] in ['rmse', 'binary_logloss', 'logloss']:
             metric_value = -metric_value
         return metric_value
 
     def train_single_model(self, X, y, test_size=0.2):
         '''Train a single model based on best parameters identified by optimization search'''
         self.single_model_params = self.validate_params(**self.lgbBO.max['params'])
-        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=test_size)
+        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=test_size, stratify=y)
         lgb_train = lgb.Dataset(X_train, y_train, feature_name=self.feature_names, categorical_feature=self.categorical_features, free_raw_data=False)
         lgb_val = lgb.Dataset(X_val, y_val, feature_name=self.feature_names, categorical_feature=self.categorical_features, free_raw_data=False)
         lgbr = lgb.train(self.single_model_params, lgb_train, num_boost_round=self.num_boost_round,
@@ -142,7 +144,7 @@ class Merlion:
     def train_ensemble_models(self, X, y, n=5, n_splits=5):
         '''Train ensemble models based on top N parameter combinations and using cross validation training'''
         self.ensemble_models_params = self.best_params(self.lgbBO, n)
-        logger.info(f'Params of top {n} models:')
+        logger.info('Params of top {} models:'.format(n))
         logger.info(self.ensemble_models_params)
         if y.nunique() <= 5:
             kf = StratifiedKFold(n_splits=n_splits, shuffle=True)
@@ -204,11 +206,11 @@ class Merlion:
 
     def generate_single_model_predictions(self, X):
         '''Generate predictions for single model'''
-        return self.single_model.predict(X, num_iteration=self.single_model.best_iteration)
+        return self.single_model.predict(X)
 
     def generate_ensemble_models_predictions(self, X):
         '''Generate predictions for ensemble models'''
-        preds = [[x.predict(X, num_iteration=x.best_iteration) for x in y] for y in self.ensemble_models]
+        preds = [[x.predict(X) for x in y] for y in self.ensemble_models]
         average_preds = np.mean(np.mean(preds, axis=0), axis=0)
         return average_preds
 
