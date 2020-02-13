@@ -111,20 +111,21 @@ class Merlion:
                         num_boost_round=self.num_boost_round, 
                         nfold=self.n_folds, 
                         seed=self.random_seed,
-                        stratified=True, 
+                        stratified=False, 
                         metrics=self.metric, 
                         early_stopping_rounds=self.early_stopping_rounds,
-                        verbose_eval=100)
+                        verbose_eval=1000)
 
-        metric_value = cv_result['{}-mean'.format(self.metric[0])][-1]
-        if self.metric[0] in ['rmse', 'binary_logloss', 'logloss']:
+        metric_value = cv_result['{}-mean'.format(self.metric)][-1]
+        if self.metric in ['rmse', 'binary_logloss', 'logloss']:
             metric_value = -metric_value
         return metric_value
 
     def train_single_model(self, X, y, test_size=0.2):
         '''Train a single model based on best parameters identified by optimization search'''
         self.single_model_params = self.validate_params(**self.lgbBO.max['params'])
-        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=test_size, stratify=y)
+        stratify = y if y.nunique() <= 5 else None
+        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=test_size, stratify=stratify)    
         lgb_train = lgb.Dataset(X_train, y_train, feature_name=self.feature_names, categorical_feature=self.categorical_features, free_raw_data=False)
         lgb_val = lgb.Dataset(X_val, y_val, feature_name=self.feature_names, categorical_feature=self.categorical_features, free_raw_data=False)
         lgbr = lgb.train(self.single_model_params, lgb_train, num_boost_round=self.num_boost_round,
