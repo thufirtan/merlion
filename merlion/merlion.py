@@ -28,7 +28,7 @@ def generate_train_test(original_df, target_col, test_size=0.2):
 
 DEFAULT_PARAMS = {'learning_rate': 0.15, 'metric': 'rmse', 'verbose':-1, 'first_metric_only':True}
 
-NO_PICKLE_ITEMS = ['best_params', 'lgb_train']
+NO_PICKLE_ITEMS = ['lgb_train']
 
 class Merlion:
     '''Base Class for Machine Learning using LightGBM and Bayes Optimization'''
@@ -46,7 +46,7 @@ class Merlion:
         '''Excluding items which cannot be pickled'''
         return dict((k, v) for (k, v) in self.__dict__.items() if k not in NO_PICKLE_ITEMS)
 
-    def fit_transform(self, X, threshold=100, nan_value_fill=''):
+    def fit_transform(self, X, threshold=100):
         '''Fit and transform training dataframe using ordinal encoder for category features'''
         categorical_features = X.select_dtypes(include='object').columns.tolist()
         high_cardinality_features = []
@@ -57,7 +57,7 @@ class Merlion:
         numerical_features = X.select_dtypes(exclude='object').columns.tolist()
         logger.info('Categorical Features {}'.format(categorical_features))
         logger.info('Numerical Features {}'.format(numerical_features))
-        logger.warn('High Cardinality Features Ignored {}'.format(high_cardinality_features))
+        logger.info('High Cardinality Features Ignored {}'.format(high_cardinality_features))
 
         self.preprocess = make_column_transformer(
             (make_pipeline(OrdinalEncoder()), categorical_features),
@@ -169,7 +169,6 @@ class Merlion:
             trial_params = {**self.default_params, **self.study.get_trials()[trial].params}
             model_params.append(trial_params)
         return model_params
-
 
     def validate_ensemble_models(self, X_test, y_test, metric):
         '''Validation of ensemble models performance'''
