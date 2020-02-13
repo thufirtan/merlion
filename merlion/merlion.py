@@ -1,8 +1,8 @@
+import optuna
 import pickle
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from bayes_opt import BayesianOptimization
 from sklearn.model_selection import StratifiedKFold, train_test_split, KFold
 from sklearn.metrics import mean_squared_error, roc_auc_score
 from sklearn.preprocessing import StandardScaler
@@ -28,25 +28,14 @@ def generate_train_test(original_df, target_col, test_size=0.2):
 
 DEFAULT_PARAMS = {'learning_rate': 0.15, 'metric': 'rmse', 'verbose':-1, 'first_metric_only':True}
 
-FEATURE_SPACE = {
-    'num_leaves': (10, 2000),
-    'min_data_in_leaf': (10, 500),
-    'colsample_bytree': (0.4, 0.99),
-    'reg_lambda': (0, 10),
-    'max_depth': (2, 64),
-    'subsample': (0.4, 1.0),
-    'feature_fraction': (0.7, 0.95)
-    }
-
-NO_PICKLE_ITEMS = ['lgb_eval', 'best_params', 'maximize', 'lgbBO', 'lgb_train']
+NO_PICKLE_ITEMS = ['best_params', 'lgb_train']
 
 class Merlion:
     '''Base Class for Machine Learning using LightGBM and Bayes Optimization'''
-    def __init__(self, default_params=DEFAULT_PARAMS, feature_space=FEATURE_SPACE, early_stopping_rounds=100, 
+    def __init__(self, default_params=DEFAULT_PARAMS, early_stopping_rounds=100, 
         num_boost_round=100000, n_folds=5, random_seed=0, metric='rmse'):
         default_params['metric'] = metric
         self.default_params = default_params
-        self.feature_space = feature_space
         self.early_stopping_rounds = early_stopping_rounds
         self.num_boost_round = num_boost_round
         self.n_folds = n_folds
@@ -82,48 +71,40 @@ class Merlion:
         '''Transform dataset for testing purposes'''
         return self.preprocess.transform(X)
 
-    def maximize(self, X_train, y_train, init_points=1, n_iter=1, acq='poi', xi=1e-4):
-        '''Trigger the optimization function to search the given feature space'''
+    def optimize(self, X_train, y_train, direction='minimize', n_trials=10):
         self.lgb_train = lgb.Dataset(X_train, y_train, feature_name=self.feature_names, categorical_feature=self.categorical_features, free_raw_data=False)
-        self.lgbBO = BayesianOptimization(f=self.lgb_eval, pbounds=self.feature_space)
-        self.lgbBO.maximize(init_points=init_points, n_iter=n_iter, acq=acq, xi=xi)
-        logger.info('Final result: {}'.format(self.lgbBO.max))
-        return
+        self.direction = direction
+        def objective(trial):
+            param_search = {
+                'num_leaves': trial.suggest_int('num_leaves', 10, 2000),
+                'min_data_in_leaf': trial.suggest_int('min_data_in_left', 10, 500),
+                'colsample_bytree': trial.suggest_uniform('colsample_bytree', 0.4, 0.99),
+                'reg_lambda': trial.suggest_uniform('reg_lambda', 0.00001, 10),
+                'max_depth': trial.suggest_int('max_depth', 2, 64),
+                'subsample': trial.suggest_uniform('subsample', 0.4, 1.0),
+                'feature_fraction': trial.suggest_uniform('feature_fraction', 0.7, 0.95)   
+            }
+            params = {**param_search, **self.default_params}
+            cv_result = lgb.cv(params=params, 
+                                    train_set=self.lgb_train, 
+                                    num_boost_round=self.num_boost_round, 
+                                    nfold=self.n_folds, 
+                                    seed=self.random_seed,
+                                    stratified=False, 
+                                    metrics=self.metric, 
+                                    early_stopping_rounds=self.early_stopping_rounds,
+                                    verbose_eval=1000)
+            metric_value = cv_result['{}-mean'.format(self.metric)][-1]
+            return metric_value
 
-    def validate_params(self, num_leaves, min_data_in_leaf, colsample_bytree, reg_lambda, max_depth, subsample, feature_fraction):
-        '''Ensure that parameters are acceptable by lightgbm'''
-        params = self.default_params.copy()
-        params['num_leaves'] = int(round(num_leaves))
-        params['min_data_in_leaf'] = int(round(min_data_in_leaf))
-        params['colsample_bytree'] = max(min(colsample_bytree, 1), 0)
-        params['reg_lambda'] = max(reg_lambda, 0)
-        params['max_depth'] = int(round(max_depth))
-        params['subsample'] = subsample
-        params['feature_fraction'] = feature_fraction
-        return params
-
-    def lgb_eval(self, num_leaves, min_data_in_leaf, colsample_bytree, reg_lambda, max_depth, subsample, feature_fraction):
-        '''Optimization function'''
-        params = self.validate_params(num_leaves, min_data_in_leaf, 
-            colsample_bytree, reg_lambda, max_depth, subsample, feature_fraction)
-        cv_result = lgb.cv(params=params, 
-                        train_set=self.lgb_train, 
-                        num_boost_round=self.num_boost_round, 
-                        nfold=self.n_folds, 
-                        seed=self.random_seed,
-                        stratified=False, 
-                        metrics=self.metric, 
-                        early_stopping_rounds=self.early_stopping_rounds,
-                        verbose_eval=1000)
-
-        metric_value = cv_result['{}-mean'.format(self.metric)][-1]
-        if self.metric in ['rmse', 'binary_logloss', 'logloss']:
-            metric_value = -metric_value
-        return metric_value
+        study = optuna.create_study(direction=self.direction)
+        study.optimize(objective, n_trials)
+        self.study = study
+        return study
 
     def train_single_model(self, X, y, test_size=0.2):
         '''Train a single model based on best parameters identified by optimization search'''
-        self.single_model_params = self.validate_params(**self.lgbBO.max['params'])
+        self.single_model_params = {**self.default_params, **self.study.best_trial.params}
         stratify = y if y.nunique() <= 5 else None
         X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=test_size, stratify=stratify)    
         lgb_train = lgb.Dataset(X_train, y_train, feature_name=self.feature_names, categorical_feature=self.categorical_features, free_raw_data=False)
@@ -144,7 +125,7 @@ class Merlion:
 
     def train_ensemble_models(self, X, y, n=5, n_splits=5):
         '''Train ensemble models based on top N parameter combinations and using cross validation training'''
-        self.ensemble_models_params = self.best_params(self.lgbBO, n)
+        self.ensemble_models_params = self.best_params(self.study, n)
         logger.info('Params of top {} models:'.format(n))
         logger.info(self.ensemble_models_params)
         if y.nunique() <= 5:
@@ -178,16 +159,17 @@ class Merlion:
             split += 1
         return
     
-    def best_params(self, lgbBO, n=5):
+    def best_params(self, study, n=5):
         '''Returns best parameters'''
-        lgbBO_df = pd.DataFrame([x['params'] for x in lgbBO.res]).join(pd.DataFrame([x['target'] for x in lgbBO.res], columns=['target']))
-        top_n = lgbBO_df.sort_values(by='target', ascending=False).head(n).drop('target', axis=1)
+        study_trials_df = self.study.trials_dataframe()
+        sort_ascending = True if self.direction == 'minimize' else False
+        trial_nos = study_trials_df.sort_values(by='value', ascending=sort_ascending).head(n).number.values
         model_params = []
-        for record in top_n.to_dict(orient='records'):
-            logger.info(record)
-            logger.info(self.default_params)
-            model_params.append(self.validate_params(**record))
+        for trial in trial_nos:
+            trial_params = {**self.default_params, **self.study.get_trials()[trial].params}
+            model_params.append(trial_params)
         return model_params
+
 
     def validate_ensemble_models(self, X_test, y_test, metric):
         '''Validation of ensemble models performance'''
